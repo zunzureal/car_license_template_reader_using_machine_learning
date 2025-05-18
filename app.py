@@ -10,6 +10,7 @@ from ultralytics import YOLO
 import re
 from itertools import groupby
 import tempfile
+import platform
 
 # Page configuration
 st.set_page_config(
@@ -25,6 +26,10 @@ if "last_license_text" not in st.session_state:
     st.session_state.last_license_text = None
 if "camera_active" not in st.session_state:
     st.session_state.camera_active = False
+if "use_webcam" not in st.session_state:
+    st.session_state.use_webcam = False
+if "webcam_warning_shown" not in st.session_state:
+    st.session_state.webcam_warning_shown = False
 
 # Cache the model loading to avoid reloading on every rerun
 @st.cache_resource
@@ -224,8 +229,71 @@ def start_stop_webcam():
     if not st.session_state.camera_active:
         st.session_state.stop_webcam = True
 
+def check_webcam_available():
+    """Check if any webcam is available on the system."""
+    available_cameras = []
+    max_to_check = 3  # Check cameras 0, 1, 2
+    
+    for i in range(max_to_check):
+        cap = cv2.VideoCapture(i)
+        if cap.isOpened():
+            ret, frame = cap.read()
+            if ret:
+                available_cameras.append(i)
+            cap.release()
+    
+    return available_cameras
+
+def use_uploaded_image(image_bytes, detection_model, processor, model, device, status_indicator, image_placeholder, result_placeholder):
+    """Process an uploaded image."""
+    try:
+        # Convert to numpy array
+        file_bytes = np.asarray(image_bytes, dtype=np.uint8)
+        image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+        
+        if image is None:
+            status_indicator.error("Could not read uploaded image.")
+            return
+        
+        status_indicator.info("Processing image...")
+        
+        # Process the image
+        annotated_frame, license_text, plate_found = process_frame(
+            image, detection_model, processor, model, device
+        )
+        
+        # Convert to RGB for display
+        annotated_frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+        
+        # Display results
+        image_placeholder.image(annotated_frame_rgb, channels="RGB", caption="Uploaded Image")
+        
+        if license_text:
+            result_placeholder.markdown(f"""
+            ### Detected License Plate
+            
+            **Text:** {license_text}
+            """)
+            status_indicator.success("License plate detected and recognized!")
+        else:
+            if plate_found:
+                result_placeholder.warning("License plate detected, but text couldn't be recognized.")
+                status_indicator.warning("License plate detected, but couldn't read the text.")
+            else:
+                result_placeholder.error("No license plate detected in the image.")
+                status_indicator.error("No license plate detected.")
+    except Exception as e:
+        status_indicator.error(f"Error processing image: {e}")
+
 def main():
     st.title("🚗 Thai License Plate Recognition")
+    
+    # Check available cameras first
+    available_cameras = check_webcam_available()
+    webcam_available = len(available_cameras) > 0
+    
+    # If running on Streamlit Cloud, webcams might be disabled
+    is_cloud_env = os.environ.get('STREAMLIT_SHARING') or os.environ.get('STREAMLIT_CLOUD')
     
     # Load models
     with st.spinner("Loading models..."):
@@ -237,9 +305,20 @@ def main():
     
     # Sidebar options
     st.sidebar.title("Options")
+    
+    # Determine available input sources
+    input_sources = ["Upload Image", "Upload Video"]
+    if webcam_available and not is_cloud_env:
+        input_sources.insert(0, "Webcam")
+        
+    # Show warning if webcam not available
+    if not webcam_available and not st.session_state.webcam_warning_shown:
+        st.warning("⚠️ No webcams detected on this system. Only upload options will be available.")
+        st.session_state.webcam_warning_shown = True
+        
     input_option = st.sidebar.radio(
         "Select input source:",
-        ["Webcam", "Upload Image", "Upload Video"]
+        input_sources
     )
 
     # Results placeholders
@@ -252,110 +331,139 @@ def main():
     # Create a status indicator
     status_indicator = st.empty()
     
-    if input_option == "Webcam":
-        # Camera selector for multiple cameras
-        camera_index = st.sidebar.selectbox("Select Camera", [0, 1, 2], 0)
+    if input_option == "Webcam" and webcam_available:
+        # Camera selector for available cameras
+        if len(available_cameras) > 1:
+            camera_index = st.sidebar.selectbox(
+                "Select Camera", 
+                available_cameras,
+                index=0
+            )
+        else:
+            camera_index = available_cameras[0]
+            st.sidebar.info(f"Using camera at index {camera_index} (only one camera available)")
+            
+        # Demo image toggle - for environments where webcam doesn't work
+        use_demo_mode = st.sidebar.checkbox("Use Demo Mode (for environments without camera access)", False)
         
-        # Create start/stop button
-        button_text = "Stop Camera" if st.session_state.camera_active else "Start Camera"
-        st.button(button_text, on_click=start_stop_webcam)
+        if use_demo_mode:
+            st.info("Using demo mode with test images instead of webcam feed.")
+            # List of demo images
+            demo_images = {
+                "Thai License Plate 1": "https://raw.githubusercontent.com/zunzureal/license-plate-demo-images/main/plate1.jpg",
+                "Thai License Plate 2": "https://raw.githubusercontent.com/zunzureal/license-plate-demo-images/main/plate2.jpg", 
+                "Demo Car": "https://raw.githubusercontent.com/zunzureal/license-plate-demo-images/main/car.jpg"
+            }
             
-        if st.session_state.camera_active:
-            status_indicator.info("Starting webcam...")
+            selected_image = st.selectbox("Select a demo image:", list(demo_images.keys()))
             
-            # Initialize webcam capture
-            try:
-                # Try different webcam access methods
-                cap = cv2.VideoCapture(camera_index)
+            if st.button("Process Demo Image"):
+                status_indicator.info(f"Processing demo image: {selected_image}")
                 
-                # Check if webcam opened successfully
-                if not cap.isOpened():
-                    # Try different backend on macOS
-                    cap = cv2.VideoCapture(camera_index, cv2.CAP_AVFOUNDATION)
+                try:
+                    import urllib.request
+                    image_url = demo_images[selected_image]
+                    with urllib.request.urlopen(image_url) as response:
+                        image_bytes = bytearray(response.read())
                     
-                if not cap.isOpened():
-                    # Try DirectShow on Windows
-                    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
-            
-                if not cap.isOpened():
-                    status_indicator.error(f"Could not open webcam with index {camera_index}. Please check your camera connection or try a different index.")
-                    st.session_state.camera_active = False
-                    return
+                    use_uploaded_image(image_bytes, detection_model, processor, model, device, 
+                                      status_indicator, image_placeholder, result_placeholder)
+                except Exception as e:
+                    status_indicator.error(f"Error loading demo image: {e}")
+        else:
+            # Create start/stop button for webcam
+            button_text = "Stop Camera" if st.session_state.camera_active else "Start Camera"
+            st.button(button_text, on_click=start_stop_webcam)
                 
-                status_indicator.success("Webcam started! Processing frames...")
+            if st.session_state.camera_active:
+                status_indicator.info("Starting webcam...")
                 
-                # Reset stopping flag
-                st.session_state.stop_webcam = False
-                
-                # For cooldown between detections
-                last_detection_time = 0
-                cooldown_period = 1  # 1 second between detections
-                
-                # Create a loop for camera frames
-                frame_placeholder = st.empty()
-                
-                while not st.session_state.stop_webcam:
-                    # Read frame
-                    ret, frame = cap.read()
+                # Initialize webcam capture
+                try:
+                    # Try different webcam access methods
+                    cap = cv2.VideoCapture(camera_index)
                     
-                    if not ret:
-                        status_indicator.warning("Failed to capture frame from camera")
-                        time.sleep(0.5)  # Wait a bit and try again
-                        continue
+                    # Check if webcam opened successfully - we already verified it works above,
+                    # but double-check in case another app grabbed it
+                    if not cap.isOpened():
+                        status_indicator.error(f"Could not open webcam with index {camera_index}. It may have been claimed by another application.")
+                        st.session_state.camera_active = False
+                        return
                     
-                    # Process every frame but only run detection on cooldown
-                    current_time = time.time()
-                    if current_time - last_detection_time > cooldown_period:
-                        annotated_frame, license_text, plate_found = process_frame(
-                            frame, detection_model, processor, model, device
-                        )
+                    status_indicator.success("Webcam started! Processing frames...")
+                    
+                    # Reset stopping flag
+                    st.session_state.stop_webcam = False
+                    
+                    # For cooldown between detections
+                    last_detection_time = 0
+                    cooldown_period = 1  # 1 second between detections
+                    
+                    # Create a loop for camera frames
+                    frame_placeholder = st.empty()
+                    
+                    while not st.session_state.stop_webcam:
+                        # Read frame
+                        ret, frame = cap.read()
                         
-                        if license_text:
-                            st.session_state.last_license_text = license_text
-                            last_detection_time = current_time
-                    else:
-                        # Just add the previous detection results to the frame
-                        annotated_frame = frame.copy()
-                        if st.session_state.last_license_text:
-                            cv2.putText(
-                                annotated_frame, 
-                                f"License: {st.session_state.last_license_text}", 
-                                (10, 30), 
-                                cv2.FONT_HERSHEY_SIMPLEX, 
-                                1, 
-                                (0, 0, 255), 
-                                2
+                        if not ret:
+                            status_indicator.warning("Failed to capture frame from camera")
+                            time.sleep(0.5)  # Wait a bit and try again
+                            continue
+                        
+                        # Process every frame but only run detection on cooldown
+                        current_time = time.time()
+                        if current_time - last_detection_time > cooldown_period:
+                            annotated_frame, license_text, plate_found = process_frame(
+                                frame, detection_model, processor, model, device
                             )
-                    
-                    # Convert to RGB for Streamlit
-                    annotated_frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-                    
-                    # Display frame
-                    image_placeholder.image(annotated_frame_rgb, channels="RGB", caption="Webcam Feed")
-                    
-                    # Display results
-                    if st.session_state.last_license_text:
-                        result_placeholder.markdown(f"""
-                        ### Detected License Plate
+                            
+                            if license_text:
+                                st.session_state.last_license_text = license_text
+                                last_detection_time = current_time
+                        else:
+                            # Just add the previous detection results to the frame
+                            annotated_frame = frame.copy()
+                            if st.session_state.last_license_text:
+                                cv2.putText(
+                                    annotated_frame, 
+                                    f"License: {st.session_state.last_license_text}", 
+                                    (10, 30), 
+                                    cv2.FONT_HERSHEY_SIMPLEX, 
+                                    1, 
+                                    (0, 0, 255), 
+                                    2
+                                )
                         
-                        **Text:** {st.session_state.last_license_text}
-                        """)
+                        # Convert to RGB for Streamlit
+                        annotated_frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                        
+                        # Display frame
+                        image_placeholder.image(annotated_frame_rgb, channels="RGB", caption="Webcam Feed")
+                        
+                        # Display results
+                        if st.session_state.last_license_text:
+                            result_placeholder.markdown(f"""
+                            ### Detected License Plate
+                            
+                            **Text:** {st.session_state.last_license_text}
+                            """)
+                        
+                        # Small delay to reduce CPU usage
+                        time.sleep(0.03)
+                        
+                        # Check if session state is still active (button might have been pressed)
+                        if not st.session_state.camera_active:
+                            st.session_state.stop_webcam = True
                     
-                    # Small delay to reduce CPU usage
-                    time.sleep(0.03)
-                    
-                    # Check if session state is still active (button might have been pressed)
-                    if not st.session_state.camera_active:
-                        st.session_state.stop_webcam = True
+                    # Release webcam
+                    cap.release()
+                    status_indicator.info("Webcam stopped.")
                 
-                # Release webcam
-                cap.release()
-                status_indicator.info("Webcam stopped.")
-            
-            except Exception as e:
-                status_indicator.error(f"Error with webcam: {e}")
-                st.session_state.camera_active = False
-                st.session_state.stop_webcam = True
+                except Exception as e:
+                    status_indicator.error(f"Error with webcam: {e}")
+                    st.session_state.camera_active = False
+                    st.session_state.stop_webcam = True
         
     elif input_option == "Upload Image":
         status_indicator.info("Please upload an image.")
@@ -363,44 +471,9 @@ def main():
         uploaded_file = st.sidebar.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
         
         if uploaded_file is not None:
-            try:
-                # Convert to numpy array
-                file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-                image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-                
-                if image is None:
-                    status_indicator.error("Could not read uploaded image.")
-                    return
-                
-                status_indicator.info("Processing image...")
-                
-                # Process the image
-                annotated_frame, license_text, plate_found = process_frame(
-                    image, detection_model, processor, model, device
-                )
-                
-                # Convert to RGB for display
-                annotated_frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-                
-                # Display results
-                image_placeholder.image(annotated_frame_rgb, channels="RGB", caption="Uploaded Image")
-                
-                if license_text:
-                    result_placeholder.markdown(f"""
-                    ### Detected License Plate
-                    
-                    **Text:** {license_text}
-                    """)
-                    status_indicator.success("License plate detected and recognized!")
-                else:
-                    if plate_found:
-                        result_placeholder.warning("License plate detected, but text couldn't be recognized.")
-                        status_indicator.warning("License plate detected, but couldn't read the text.")
-                    else:
-                        result_placeholder.error("No license plate detected in the image.")
-                        status_indicator.error("No license plate detected.")
-            except Exception as e:
-                status_indicator.error(f"Error processing image: {e}")
+            image_bytes = uploaded_file.getvalue()
+            use_uploaded_image(image_bytes, detection_model, processor, model, device, 
+                             status_indicator, image_placeholder, result_placeholder)
     
     elif input_option == "Upload Video":
         status_indicator.info("Please upload a video file.")
@@ -496,6 +569,18 @@ def main():
     
     The system will detect license plates and attempt to read the text.
     """)
+
+    # Add deployment info
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Deployment Information")
+    st.sidebar.markdown(f"• Running on: **{platform.system()} {platform.release()}**")
+    st.sidebar.markdown(f"• Using device: **{device}**")
+    
+    # Add webcam status
+    if webcam_available:
+        st.sidebar.markdown(f"• Available cameras: **{len(available_cameras)}** (indices: {', '.join(map(str, available_cameras))})")
+    else:
+        st.sidebar.markdown("• No cameras detected")
 
 if __name__ == "__main__":
     main()
