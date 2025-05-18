@@ -7,5 +7,5 @@ imutils
 matplotlib
 easyocr
 numpy
-streamlit-webrtc==0.48.1
+streamlit-webrtc==0.45.0
 streamlit
