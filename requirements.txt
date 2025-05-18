@@ -8,4 +8,4 @@ matplotlib
 easyocr
 numpy
 streamlit-webrtc>=0.48.1
-streamlit>=1.22.0
+streamlit==1.22.0
