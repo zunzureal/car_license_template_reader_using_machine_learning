@@ -1,0 +1,9 @@
+transformers==4.51.3
+Pillow==11.2.1
+torch==2.7.0
+opencv-python
+ultralytics
+imutils==0.5.4
+matplotlib
+easyocr
+numpy
