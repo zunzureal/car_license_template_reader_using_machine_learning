@@ -6,6 +6,10 @@ import re
 from itertools import groupby
 from ultralytics import YOLO
 
+processor = TrOCRProcessor.from_pretrained("spykittichai/th-character-ocr")
+model = VisionEncoderDecoderModel.from_pretrained("spykittichai/th-character-ocr")
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+model.to(device)
 
 def detect_and_crop_license_plates(image, model_path='./model/best.pt'):
     """
@@ -37,13 +41,6 @@ def clean_and_filter(text):
     filtered = re.findall(r'[ก-๙0-9]', text)
     return ''.join(filtered)
 
-
-# Load model and processor
-model_path = "./th_character_process_v4"
-processor = TrOCRProcessor.from_pretrained(model_path)
-model = VisionEncoderDecoderModel.from_pretrained(model_path)
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-model.to(device)
 
 def predict(image_path):
     image = image_path.resize((384, 384))
@@ -108,7 +105,7 @@ def check_img(img):
             white_pixels = cv2.countNonZero(cropped)
             total_pixels = thresh.shape[0] * thresh.shape[1]
             black_pixels = total_pixels - white_pixels
-            if 60 < height <= 170 and 12 < width <= 60 and white_pixels > 900:
+            if 60 < height <= 170 and 12 < width <= 60 and white_pixels > 700:
                 """ white_pixels = cv2.countNonZero(cropped)
                 total_pixels = thresh.shape[0] * thresh.shape[1]
                 black_pixels = total_pixels - white_pixels
@@ -116,8 +113,8 @@ def check_img(img):
                 print(f"จำนวนพิกเซลสีขาว: {white_pixels}")
                 print(f"จำนวนพิกเซลสีดำ: {black_pixels}")
                 print(height, width) """
-                cv2.imshow("Cropped Contour", cropped)
-                cv2.waitKey(0)
+                """ cv2.imshow("Cropped Contour", cropped)
+                cv2.waitKey(0) """
                 passed_img.append(cropped)
         
         word = []
@@ -133,9 +130,9 @@ def check_img(img):
             if cleaned:
                 word.append(cleaned)
 
-        print(word)
+        print(80 * "-")
         print("License plate:", "".join(word))
-        print(word_no_clean)
+        print(80 * "-")
 
 if __name__ == "__main__":
     image_path = "./image/img1.png"

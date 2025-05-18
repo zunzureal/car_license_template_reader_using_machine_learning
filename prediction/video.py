@@ -9,9 +9,8 @@ import os
 import numpy as np
 
 # Load model and processor
-model_path = "./th_character_process_v4"
-processor = TrOCRProcessor.from_pretrained(model_path)
-model = VisionEncoderDecoderModel.from_pretrained(model_path)
+processor = TrOCRProcessor.from_pretrained("spykittichai/th-character-ocr")
+model = VisionEncoderDecoderModel.from_pretrained("spykittichai/th-character-ocr")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model.to(device)
 
@@ -121,9 +120,9 @@ def check_img(img):
             cleaned = clean_and_filter(result)
             if cleaned:
                 word.append(cleaned)
-        print(50 * "-")
+        print(80 * "-")
         print("License plate:", "".join(word))
-        print(50 * "-")
+        print(80 * "-")
         
 def detect_and_crop_license_plates(image, model_path='../detection/model/best.pt'):
     """
