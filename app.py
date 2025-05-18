@@ -12,6 +12,10 @@ from itertools import groupby
 import tempfile
 import platform
 import traceback
+import requests
+import base64
+import io
+from datetime import datetime
 
 # Page configuration
 st.set_page_config(
@@ -31,12 +35,96 @@ if "use_webcam" not in st.session_state:
     st.session_state.use_webcam = False
 if "webcam_warning_shown" not in st.session_state:
     st.session_state.webcam_warning_shown = False
+if "detections_saved" not in st.session_state:
+    st.session_state.detections_saved = set()
+
+# Supabase integration
+SUPABASE_URL = "https://nyfaluazyaribgfqryxy.supabase.co"
+SUPABASE_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im55ZmFsdWF6eWFyaWJnZnFyeXh5Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc0NzA0NzQ1MCwiZXhwIjoyMDYyNjIzNDUwfQ.rbytQ-q5a8cN-A-LakAmtywl2VqXn-CiTeJXkhKJeIk"
+
+def is_valid_license_plate(text):
+    """
+    Check if the detected text appears to be a valid Thai license plate.
+    A valid license plate should have:
+    1. At least 2 Thai characters (ก-๙)
+    2. Exactly 4-5 numbers (0-9) 
+    3. Total length of at least 6 characters
+    """
+    if not text or len(text) <= 5:
+        return False
+        
+    thai_chars = re.findall(r'[ก-๙]', text)
+    has_thai = len(thai_chars) >= 2
+    
+    numbers = re.findall(r'[0-9]', text)
+    has_four_numbers = 4 <= len(numbers) <= 5
+    
+    # Return True only if both criteria are met
+    return has_thai and has_four_numbers
+
+def insert_data_to_supabase(plate, city=None, image_data=None):
+    """
+    Save license plate data and captured image to Supabase database
+    """
+    if not plate:
+        return False
+    
+    # Validate license plate format before saving
+    if not is_valid_license_plate(plate):
+        st.warning(f"'{plate}' does not appear to be a valid license plate (needs Thai characters and 4-5 numbers). Not saving to database.")
+        return False
+        
+    url = f"{SUPABASE_URL}/rest/v1/car"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {SUPABASE_KEY}"
+    }
+
+    # Ensure we have a city value or use default
+    if not city:
+        city = "Unknown"
+
+    # Get current timestamp in ISO format
+    current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+
+    # Prepare base data
+    data = {
+        "plate_number": plate,
+        "city": city,
+        "detected_at": current_time
+    }
+    
+    # Add image data if provided
+    if image_data is not None:
+        try:
+            # Resize image to reduce storage size (adjust dimensions as needed)
+            image_resized = cv2.resize(image_data, (640, 480))
+            
+            # Convert to JPEG format with compression
+            is_success, buffer = cv2.imencode(".jpg", image_resized, [cv2.IMWRITE_JPEG_QUALITY, 85])
+            if is_success:
+                # Convert to base64 for storage
+                img_str = base64.b64encode(buffer).decode('utf-8')
+                data["image_data"] = img_str
+            else:
+                st.warning("Failed to encode image for storage")
+        except Exception as img_error:
+            st.warning(f"Could not process image for database storage: {img_error}")
+
+    try:
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        return True
+    except Exception as e:
+        st.error(f"Error saving to database: {e}")
+        return False
 
 # Cache the model loading to avoid reloading on every rerun
 @st.cache_resource
 def load_models():
     try:
-        # Load OCR models with use_fast=True to fix the warning
+        # Load OCR models with use_fast=False to fix the warning
         processor = TrOCRProcessor.from_pretrained(
             "spykittichai/th-character-ocr", 
             use_fast=False,
@@ -303,12 +391,38 @@ def use_uploaded_image(image_bytes, detection_model, processor, model, device, s
         image_placeholder.image(annotated_frame_rgb, channels="RGB", caption="Uploaded Image")
         
         if license_text:
+            # Get the city from user input
+            city = st.text_input("Enter city (optional):", key="city_input")
+            
+            # Check if it's a valid license plate format
+            is_valid = is_valid_license_plate(license_text)
+            
+            # Display validation status
+            if is_valid:
+                validation_status = "✅ Valid license plate format detected"
+            else:
+                validation_status = "⚠️ Not a valid license plate format (missing characters or numbers)"
+            
+            # Add a save button (enabled only if the format is valid)
+            save_clicked = st.button("Save to Database", disabled=not is_valid)
+            
             result_placeholder.markdown(f"""
             ### Detected License Plate
             
             **Text:** {license_text}
+            
+            **Validation:** {validation_status}
             """)
+            
             status_indicator.success("License plate detected and recognized!")
+            
+            # Save to database if button clicked and format is valid
+            if save_clicked and is_valid:
+                if insert_data_to_supabase(license_text, city, annotated_frame):
+                    status_indicator.success(f"License plate {license_text} saved to database with image!")
+                    st.session_state.detections_saved.add(license_text)
+                else:
+                    status_indicator.error("Failed to save to database.")
         else:
             if plate_found:
                 result_placeholder.warning("License plate detected, but text couldn't be recognized.")
@@ -355,6 +469,12 @@ def main():
     
     # Always provide Demo mode
     demo_mode = st.sidebar.checkbox("Use Demo Mode (sample images)", False)
+    
+    # Database options
+    st.sidebar.markdown("### Database Options")
+    save_to_db = st.sidebar.checkbox("Auto-save valid detections to database", False)
+    save_images = st.sidebar.checkbox("Save images with detections", True)
+    default_city = st.sidebar.text_input("Default city for detections", "Bangkok")
     
     # Determine available input sources
     input_sources = ["Upload Image", "Upload Video"]
@@ -490,6 +610,13 @@ def main():
                             if license_text:
                                 st.session_state.last_license_text = license_text
                                 last_detection_time = current_time
+                                
+                                # Save to database if auto-save is enabled, this is a new detection, and format is valid
+                                if save_to_db and license_text not in st.session_state.detections_saved and is_valid_license_plate(license_text):
+                                    image_data = annotated_frame if save_images else None
+                                    if insert_data_to_supabase(license_text, default_city, image_data):
+                                        status_indicator.success(f"License plate {license_text} saved to database with image!")
+                                        st.session_state.detections_saved.add(license_text)
                         else:
                             # Just add the previous detection results to the frame
                             annotated_frame = frame.copy()
@@ -512,10 +639,15 @@ def main():
                         
                         # Display results
                         if st.session_state.last_license_text:
+                            is_valid = is_valid_license_plate(st.session_state.last_license_text)
+                            validation_status = "✅ Valid" if is_valid else "⚠️ Invalid format"
+                            
                             result_placeholder.markdown(f"""
                             ### Detected License Plate
                             
                             **Text:** {st.session_state.last_license_text}
+                            
+                            **Format:** {validation_status}
                             """)
                         
                         # Small delay to reduce CPU usage
@@ -585,6 +717,8 @@ def main():
                 
                 # Container for displaying detection results
                 all_detections = []
+                valid_detections = []  # Track which detections have valid format
+                frames_with_detections = {}  # Store frames for valid detections
                 
                 # Process the video
                 while cap.isOpened():
@@ -601,7 +735,21 @@ def main():
                         if license_text:
                             # Check if it's a new detection or same as previous
                             if not all_detections or all_detections[-1][1] != license_text:
-                                all_detections.append((frame_counter, license_text))
+                                is_valid = is_valid_license_plate(license_text)
+                                all_detections.append((frame_counter, license_text, is_valid))
+                                
+                                # Track valid detections separately
+                                if is_valid:
+                                    valid_detections.append((frame_counter, license_text))
+                                    # Keep the frame if we want to save images
+                                    if save_images:
+                                        frames_with_detections[frame_counter] = annotated_frame
+                                
+                                # Save to database if auto-save is enabled and format is valid
+                                if save_to_db and license_text not in st.session_state.detections_saved and is_valid:
+                                    image_data = annotated_frame if save_images else None
+                                    if insert_data_to_supabase(license_text, default_city, image_data):
+                                        st.session_state.detections_saved.add(license_text)
                             
                         # Display the current frame
                         if frame_counter % 15 == 0:  # Update display less frequently
@@ -619,15 +767,31 @@ def main():
                     os.unlink(temp_file_path)
                 
                 # Show results
-                status_indicator.success(f"Video processing complete! Found {len(all_detections)} license plates.")
+                status_indicator.success(f"Video processing complete! Found {len(all_detections)} potential license plates ({len(valid_detections)} valid format).")
                 
                 if all_detections:
                     result_text = "### Detected License Plates\n\n"
-                    for frame_num, text in all_detections:
+                    for frame_num, text, is_valid in all_detections:
                         time_sec = frame_num / fps
-                        result_text += f"- At {time_sec:.2f}s (frame {frame_num}): **{text}**\n"
+                        validation_mark = "✅" if is_valid else "⚠️"
+                        result_text += f"- At {time_sec:.2f}s (frame {frame_num}): **{text}** {validation_mark}\n"
                     
                     result_placeholder.markdown(result_text)
+                    
+                    # Show save all button if auto-save is not enabled and there are valid plates
+                    if not save_to_db and valid_detections:
+                        save_all = st.button("Save Valid Detections to Database")
+                        if save_all:
+                            success_count = 0
+                            for frame_num, plate in valid_detections:
+                                if plate not in st.session_state.detections_saved:
+                                    # Use the stored frame if available
+                                    image_data = frames_with_detections.get(frame_num) if save_images else None
+                                    if insert_data_to_supabase(plate, default_city, image_data):
+                                        success_count += 1
+                                        st.session_state.detections_saved.add(plate)
+                            
+                            status_indicator.success(f"Saved {success_count} valid license plates to database!")
                 else:
                     result_placeholder.warning("No license plates detected in the video.")
             except Exception as e:
@@ -642,9 +806,23 @@ def main():
     1. Select an input source from the sidebar (Webcam, Upload Image, or Upload Video).
     2. For webcam, press Start Camera and wait for detections.
     3. For images and videos, upload a file and wait for processing.
+    4. Use the database options to automatically save valid license plate detections.
     
-    The system will detect license plates and attempt to read the text.
+    The system will detect license plates, attempt to read the text, validate the format, and save valid plates to the database.
+    
+    **Note:** Only license plates with at least 2 Thai characters and 4-5 numbers will be saved to the database. Images will also be stored for monitoring purposes.
     """)
+
+    # Add database section
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### Database Status")
+    saved_count = len(st.session_state.detections_saved)
+    st.sidebar.markdown(f"• Plates saved this session: **{saved_count}**")
+    
+    if saved_count > 0:
+        st.sidebar.markdown("• Saved plates:")
+        for plate in st.session_state.detections_saved:
+            st.sidebar.markdown(f"  - {plate}")
 
     # Add deployment info
     st.sidebar.markdown("---")
