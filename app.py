@@ -16,6 +16,7 @@ import requests
 import base64
 import io
 from datetime import datetime
+import pytz
 
 # Page configuration
 st.set_page_config(
@@ -86,7 +87,8 @@ def insert_data_to_supabase(plate, city=None, image_data=None):
         city = "Unknown"
 
     # Get current timestamp in ISO format
-    current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+    bangkok_tz = pytz.timezone('Asia/Bangkok')
+    current_time = datetime.now(bangkok_tz).strftime("%Y-%m-%d %H:%M:%S")
 
     # Prepare base data
     data = {
