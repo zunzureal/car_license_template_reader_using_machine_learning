@@ -42,3 +42,4 @@ This project is an automated license plate detection and recognition system from
 
    ```bash
    python video.py
+
