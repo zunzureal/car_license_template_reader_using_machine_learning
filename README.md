@@ -1,4 +1,4 @@
-# car_license_template_reader_using_machine_learning
+# Car_license_template_reader_using_machine_learning
 
 # Project Description
 
@@ -15,9 +15,6 @@ This project is an automated license plate detection and recognition system from
 
 4. **Optical Character Recognition (OCR)**  
    Using a pretrained TrOCR (Transformer-based OCR) model fine-tuned for Thai characters and digits to read each segmented character from the license plate.
-
-5. **Text Cleaning and Filtering**  
-   Filtering the recognized text to retain only Thai characters and digits, removing duplicates and noise for a clean and accurate license plate string.
 
 ---
 
