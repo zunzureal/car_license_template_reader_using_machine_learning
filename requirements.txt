@@ -8,3 +8,4 @@ matplotlib
 easyocr
 numpy
 streamlit-webrtc
+streamlit
