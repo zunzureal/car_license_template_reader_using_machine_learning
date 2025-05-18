@@ -185,7 +185,7 @@ def predict(processor, model, device, image_path):
     try:
         image = image_path.resize((384, 384))
         pixel_values = processor(images=image, return_tensors="pt").pixel_values.to(device)
-        generated_ids = model.generate(pixel_values)
+        generated_ids = model.generate(pixel_values, max_length=20)
         text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
         return text
     except Exception as e:
@@ -575,10 +575,15 @@ def main():
                         cap = None
                 
                 # Check if webcam opened successfully
+                                # After successfully opening the camera
                 if cap is None or not cap.isOpened():
-                    status_indicator.error(f"Could not open webcam with index {camera_index}. It may have been claimed by another application.")
+                    status_indicator.error(f"Could not open webcam with index {camera_index}.")
                     st.session_state.camera_active = False
                     return
+                
+                # Set smaller resolution for better performance
+                cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+                cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
                 
                 status_indicator.success("Webcam started! Processing frames...")
                 
@@ -586,8 +591,13 @@ def main():
                 st.session_state.stop_webcam = False
                 
                 # For cooldown between detections
+                                # Reset stopping flag
+                st.session_state.stop_webcam = False
+                
+                # For cooldown between detections
                 last_detection_time = 0
                 cooldown_period = 1  # 1 second between detections
+                frame_counter = 0  # Add frame counter
                 
                 # Create a loop for camera frames
                 frame_placeholder = st.empty()
@@ -602,43 +612,54 @@ def main():
                             time.sleep(0.5)  # Wait a bit and try again
                             continue
                         
-                        # Process every frame but only run detection on cooldown
-                        current_time = time.time()
-                        if current_time - last_detection_time > cooldown_period:
-                            annotated_frame, license_text, plate_found = process_frame(
-                                frame, detection_model, processor, model, device
-                            )
-                            
-                            if license_text:
-                                st.session_state.last_license_text = license_text
-                                last_detection_time = current_time
-                                
-                                # Save to database if auto-save is enabled, this is a new detection, and format is valid
-                                if save_to_db and license_text not in st.session_state.detections_saved and is_valid_license_plate(license_text):
-                                    image_data = annotated_frame if save_images else None
-                                    if insert_data_to_supabase(license_text, default_city, image_data):
-                                        status_indicator.success(f"License plate {license_text} saved to database with image!")
-                                        st.session_state.detections_saved.add(license_text)
-                        else:
-                            # Just add the previous detection results to the frame
-                            annotated_frame = frame.copy()
-                            if st.session_state.last_license_text:
-                                cv2.putText(
-                                    annotated_frame, 
-                                    f"License: {st.session_state.last_license_text}", 
-                                    (10, 30), 
-                                    cv2.FONT_HERSHEY_SIMPLEX, 
-                                    1, 
-                                    (0, 0, 255), 
-                                    2
+                        # Display every frame but only process every 3rd frame
+                        frame_counter += 1
+                        
+                        # Process frame for detection only sometimes (every 3rd frame)
+                        if frame_counter % 3 == 0:
+                            # Process every frame but only run detection on cooldown
+                            current_time = time.time()
+                            if current_time - last_detection_time > cooldown_period:
+                                # Resize frame for processing to improve performance
+                                processed_frame = cv2.resize(frame, (640, 480))
+                                annotated_frame, license_text, plate_found = process_frame(
+                                    processed_frame, detection_model, processor, model, device
                                 )
+                                
+                                if license_text:
+                                    st.session_state.last_license_text = license_text
+                                    last_detection_time = current_time
+                                    
+                                    # Save to database if auto-save is enabled
+                                    if save_to_db and license_text not in st.session_state.detections_saved and is_valid_license_plate(license_text):
+                                        image_data = annotated_frame if save_images else None
+                                        if insert_data_to_supabase(license_text, default_city, image_data):
+                                            status_indicator.success(f"License plate {license_text} saved to database with image!")
+                                            st.session_state.detections_saved.add(license_text)
+                            else:
+                                # Just copy the frame without processing
+                                annotated_frame = frame.copy()
+                        else:
+                            # Use the frame directly without detection for smoother video
+                            annotated_frame = frame.copy()
+                            
+                        # Always add any previously detected text to the current frame
+                        if st.session_state.last_license_text:
+                            cv2.putText(
+                                annotated_frame, 
+                                f"License: {st.session_state.last_license_text}", 
+                                (10, 30), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 
+                                1, 
+                                (0, 0, 255), 
+                                2
+                            )
                         
                         # Convert to RGB for Streamlit
                         annotated_frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
                         
                         # Display frame
                         image_placeholder.image(annotated_frame_rgb, channels="RGB", caption="Webcam Feed")
-                        
                         # Display results
                         if st.session_state.last_license_text:
                             is_valid = is_valid_license_plate(st.session_state.last_license_text)
@@ -754,7 +775,7 @@ def main():
                                         st.session_state.detections_saved.add(license_text)
                             
                         # Display the current frame
-                        if frame_counter % 15 == 0:  # Update display less frequently
+                        if frame_counter % 30 == 0:  # Update display less frequently
                             annotated_frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
                             image_placeholder.image(annotated_frame_rgb, channels="RGB", caption=f"Frame {frame_counter}")
                     
