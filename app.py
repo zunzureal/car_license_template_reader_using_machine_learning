@@ -9,6 +9,7 @@ from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 from ultralytics import YOLO
 import re
 from itertools import groupby
+import tempfile
 
 # Page configuration
 st.set_page_config(
@@ -17,34 +18,53 @@ st.set_page_config(
     layout="wide"
 )
 
+# Initialize session state variables
+if "stop_webcam" not in st.session_state:
+    st.session_state.stop_webcam = True
+if "last_license_text" not in st.session_state:
+    st.session_state.last_license_text = None
+if "camera_active" not in st.session_state:
+    st.session_state.camera_active = False
+
 # Cache the model loading to avoid reloading on every rerun
 @st.cache_resource
 def load_models():
-    # Load OCR models
-    processor = TrOCRProcessor.from_pretrained("spykittichai/th-character-ocr")
-    model = VisionEncoderDecoderModel.from_pretrained("spykittichai/th-character-ocr")
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model.to(device)
-    
-    # Load detection model
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    detection_model_path = os.path.join(script_dir, "detection/model/best.pt")
-    
-    if not os.path.exists(detection_model_path):
-        st.error(f"Model file not found: {detection_model_path}")
-        detection_model_path = "detection/model/best.pt"  # Try relative path
+    try:
+        # Load OCR models
+        processor = TrOCRProcessor.from_pretrained("spykittichai/th-character-ocr")
+        model = VisionEncoderDecoderModel.from_pretrained("spykittichai/th-character-ocr")
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        model.to(device)
         
-    detection_model = YOLO(detection_model_path)
-    
-    return processor, model, device, detection_model
+        # Load detection model
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        detection_model_path = os.path.join(script_dir, "detection/model/best.pt")
+        
+        if not os.path.exists(detection_model_path):
+            st.warning(f"Model file not found at {detection_model_path}, trying relative path")
+            detection_model_path = "detection/model/best.pt"
+            
+            if not os.path.exists(detection_model_path):
+                st.error(f"Model file not found at {detection_model_path} either")
+                return None, None, None, None
+        
+        detection_model = YOLO(detection_model_path)
+        
+        return processor, model, device, detection_model
+    except Exception as e:
+        st.error(f"Error loading models: {e}")
+        return None, None, None, None
 
-# Functions from your original code
 def predict(processor, model, device, image_path):
-    image = image_path.resize((384, 384))
-    pixel_values = processor(images=image, return_tensors="pt").pixel_values.to(device)
-    generated_ids = model.generate(pixel_values)
-    text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
-    return text
+    try:
+        image = image_path.resize((384, 384))
+        pixel_values = processor(images=image, return_tensors="pt").pixel_values.to(device)
+        generated_ids = model.generate(pixel_values)
+        text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+        return text
+    except Exception as e:
+        st.error(f"Error in prediction: {e}")
+        return ""
 
 def clean_and_filter(text):
     # 1. ลบตัวซ้ำที่ติดกัน เช่น '777777' → '7'
@@ -61,71 +81,75 @@ def check_img(processor, model, device, img):
     if not isinstance(img, np.ndarray):
         return None
     
-    img = cv2.resize(img, (348, 348))  # Resize ขนาดภาพ
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    try:
+        img = cv2.resize(img, (348, 348))  # Resize ขนาดภาพ
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    ret, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_OTSU | cv2.THRESH_BINARY_INV)
+        ret, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_OTSU | cv2.THRESH_BINARY_INV)
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-    dilation = cv2.dilate(thresh, kernel, iterations=1)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        dilation = cv2.dilate(thresh, kernel, iterations=1)
 
-    erosion = cv2.erode(dilation, kernel, iterations=1)
+        erosion = cv2.erode(dilation, kernel, iterations=1)
 
-    contours, hierarchy = cv2.findContours(erosion, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        contours, hierarchy = cv2.findContours(erosion, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-    cropped_images = []
+        cropped_images = []
 
-    for cnt in contours:
-        x, y, w, h = cv2.boundingRect(cnt)
-        cropped = erosion[y:y+h, x:x+w]  # Crop ภาพ
-        cropped_images.append((x, y, cropped))
+        for cnt in contours:
+            x, y, w, h = cv2.boundingRect(cnt)
+            cropped = erosion[y:y+h, x:x+w]  # Crop ภาพ
+            cropped_images.append((x, y, cropped))
 
-    line_threshold = 150
-    lines = []
+        line_threshold = 150
+        lines = []
 
-    cropped_images.sort(key=lambda item: item[1]) 
+        cropped_images.sort(key=lambda item: item[1]) 
 
-    for item in cropped_images:
-        x, y, cropped = item
-        placed = False
+        for item in cropped_images:
+            x, y, cropped = item
+            placed = False
+            for line in lines:
+                if abs(line[0][1] - y) < line_threshold:
+                    line.append(item)
+                    placed = True
+                    break
+            if not placed:
+                lines.append([item]) 
+                
         for line in lines:
-            if abs(line[0][1] - y) < line_threshold:
-                line.append(item)
-                placed = True
-                break
-        if not placed:
-            lines.append([item]) 
-            
-    for line in lines:
-        line.sort(key=lambda item: item[0])
+            line.sort(key=lambda item: item[0])
 
-    cropped_images = [item for line in lines for item in line]
-    
-    passed_img = []
-    
-    for _, _, cropped in cropped_images:
-        height, width = cropped.shape
+        cropped_images = [item for line in lines for item in line]
+        
+        passed_img = []
+        
+        for _, _, cropped in cropped_images:
+            height, width = cropped.shape
 
-        white_pixels = cv2.countNonZero(cropped)
+            white_pixels = cv2.countNonZero(cropped)
 
-        if 60 < height <= 170 and 12 < width <= 60 and white_pixels > 700:
-            passed_img.append(cropped)
-    
-    word = []
-    word_no_clean = []
-    for img in passed_img:
-        if len(img.shape) == 2: 
-            img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
-        pil_img = Image.fromarray(img)
+            if 60 < height <= 170 and 12 < width <= 60 and white_pixels > 700:
+                passed_img.append(cropped)
+        
+        word = []
+        word_no_clean = []
+        for img in passed_img:
+            if len(img.shape) == 2: 
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            pil_img = Image.fromarray(img)
 
-        result = predict(processor, model, device, pil_img)
-        word_no_clean.append(result)
-        cleaned = clean_and_filter(result)
-        if cleaned:
-            word.append(cleaned)
-    
-    license_text = "".join(word)
-    return license_text
+            result = predict(processor, model, device, pil_img)
+            word_no_clean.append(result)
+            cleaned = clean_and_filter(result)
+            if cleaned:
+                word.append(cleaned)
+        
+        license_text = "".join(word)
+        return license_text
+    except Exception as e:
+        st.error(f"Error in check_img: {e}")
+        return None
 
 def detect_and_crop_license_plates(image, model):
     """
@@ -133,48 +157,72 @@ def detect_and_crop_license_plates(image, model):
     """
     if image is None:
         return [], []
-        
-    rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
-    results = model.predict(rgb_image)
+    
+    try:    
+        rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        results = model.predict(rgb_image)
 
-    cropped_images = []
-    boxes = []
+        cropped_images = []
+        boxes = []
 
-    if results and results[0].boxes:
-        boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
-        for box in boxes:
-            x1, y1, x2, y2 = box
-            cropped = image[y1:y2, x1:x2]
-            cropped_images.append(cropped)
+        if results and results[0].boxes:
+            boxes = results[0].boxes.xyxy.cpu().numpy().astype(int)
+            for box in boxes:
+                x1, y1, x2, y2 = box
+                # Ensure indices are within bounds
+                x1, y1 = max(0, x1), max(0, y1)
+                x2, y2 = min(image.shape[1], x2), min(image.shape[0], y2)
+                
+                # Skip invalid boxes
+                if x1 >= x2 or y1 >= y2:
+                    continue
+                    
+                cropped = image[y1:y2, x1:x2]
+                cropped_images.append(cropped)
 
-    return cropped_images, boxes
+        return cropped_images, boxes
+    except Exception as e:
+        st.error(f"Error in detect_and_crop_license_plates: {e}")
+        return [], []
 
 def process_frame(frame, detection_model, processor, model, device):
-    # First detection
-    cropped_plates, boxes = detect_and_crop_license_plates(frame, detection_model)
-    
-    license_text = None
-    annotated_frame = frame.copy()
-    
-    # Draw boxes on the frame
-    for box in boxes:
-        x1, y1, x2, y2 = box
-        cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-    
-    # Process first plate if found
-    if cropped_plates:
-        best_plate = cropped_plates[0]
+    if frame is None:
+        return None, None, False
         
-        # Try second detection on cropped plate for better accuracy
-        second_crop, _ = detect_and_crop_license_plates(best_plate, detection_model)
+    try:
+        # First detection
+        cropped_plates, boxes = detect_and_crop_license_plates(frame, detection_model)
         
-        if second_crop:
-            final_crop = second_crop[0]
-            license_text = check_img(processor, model, device, final_crop)
-        else:
-            license_text = check_img(processor, model, device, best_plate)
+        license_text = None
+        annotated_frame = frame.copy()
+        
+        # Draw boxes on the frame
+        for box in boxes:
+            x1, y1, x2, y2 = box
+            cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        
+        # Process first plate if found
+        if cropped_plates:
+            best_plate = cropped_plates[0]
             
-    return annotated_frame, license_text, bool(cropped_plates)
+            # Try second detection on cropped plate for better accuracy
+            second_crop, _ = detect_and_crop_license_plates(best_plate, detection_model)
+            
+            if second_crop and len(second_crop) > 0:
+                final_crop = second_crop[0]
+                license_text = check_img(processor, model, device, final_crop)
+            else:
+                license_text = check_img(processor, model, device, best_plate)
+                
+        return annotated_frame, license_text, bool(cropped_plates)
+    except Exception as e:
+        st.error(f"Error processing frame: {e}")
+        return frame, None, False
+
+def start_stop_webcam():
+    st.session_state.camera_active = not st.session_state.camera_active
+    if not st.session_state.camera_active:
+        st.session_state.stop_webcam = True
 
 def main():
     st.title("🚗 Thai License Plate Recognition")
@@ -182,6 +230,9 @@ def main():
     # Load models
     with st.spinner("Loading models..."):
         processor, model, device, detection_model = load_models()
+        if processor is None or model is None or device is None or detection_model is None:
+            st.error("Failed to load models. Please check your model files and dependencies.")
+            return
         st.success("Models loaded successfully! Ready to detect license plates.")
     
     # Sidebar options
@@ -202,32 +253,55 @@ def main():
     status_indicator = st.empty()
     
     if input_option == "Webcam":
-        status_indicator.info("Starting webcam...")
+        # Camera selector for multiple cameras
+        camera_index = st.sidebar.selectbox("Select Camera", [0, 1, 2], 0)
         
-        # Start webcam button
-        start_button = st.button("Start Webcam")
-        stop_button = st.button("Stop")
-        
-        if start_button:
-            # Access webcam
-            cap = cv2.VideoCapture(0)
+        # Create start/stop button
+        button_text = "Stop Camera" if st.session_state.camera_active else "Start Camera"
+        st.button(button_text, on_click=start_stop_webcam)
             
-            if not cap.isOpened():
-                st.error("Could not open webcam. Please check your camera connection.")
-            else:
+        if st.session_state.camera_active:
+            status_indicator.info("Starting webcam...")
+            
+            # Initialize webcam capture
+            try:
+                # Try different webcam access methods
+                cap = cv2.VideoCapture(camera_index)
+                
+                # Check if webcam opened successfully
+                if not cap.isOpened():
+                    # Try different backend on macOS
+                    cap = cv2.VideoCapture(camera_index, cv2.CAP_AVFOUNDATION)
+                    
+                if not cap.isOpened():
+                    # Try DirectShow on Windows
+                    cap = cv2.VideoCapture(camera_index, cv2.CAP_DSHOW)
+            
+                if not cap.isOpened():
+                    status_indicator.error(f"Could not open webcam with index {camera_index}. Please check your camera connection or try a different index.")
+                    st.session_state.camera_active = False
+                    return
+                
                 status_indicator.success("Webcam started! Processing frames...")
                 
-                last_detection_time = 0
-                cooldown_period = 1  # 1 second between detections
-                last_license_text = None
-                
-                # Use session_state to control the webcam loop
+                # Reset stopping flag
                 st.session_state.stop_webcam = False
                 
+                # For cooldown between detections
+                last_detection_time = 0
+                cooldown_period = 1  # 1 second between detections
+                
+                # Create a loop for camera frames
+                frame_placeholder = st.empty()
+                
                 while not st.session_state.stop_webcam:
+                    # Read frame
                     ret, frame = cap.read()
+                    
                     if not ret:
-                        break
+                        status_indicator.warning("Failed to capture frame from camera")
+                        time.sleep(0.5)  # Wait a bit and try again
+                        continue
                     
                     # Process every frame but only run detection on cooldown
                     current_time = time.time()
@@ -237,15 +311,15 @@ def main():
                         )
                         
                         if license_text:
-                            last_license_text = license_text
+                            st.session_state.last_license_text = license_text
                             last_detection_time = current_time
                     else:
                         # Just add the previous detection results to the frame
                         annotated_frame = frame.copy()
-                        if last_license_text:
+                        if st.session_state.last_license_text:
                             cv2.putText(
                                 annotated_frame, 
-                                f"License: {last_license_text}", 
+                                f"License: {st.session_state.last_license_text}", 
                                 (10, 30), 
                                 cv2.FONT_HERSHEY_SIMPLEX, 
                                 1, 
@@ -260,62 +334,73 @@ def main():
                     image_placeholder.image(annotated_frame_rgb, channels="RGB", caption="Webcam Feed")
                     
                     # Display results
-                    if last_license_text:
+                    if st.session_state.last_license_text:
                         result_placeholder.markdown(f"""
                         ### Detected License Plate
                         
-                        **Text:** {last_license_text}
+                        **Text:** {st.session_state.last_license_text}
                         """)
                     
-                    # Check if stop was pressed (needs to be implemented as a callback)
-                    if stop_button:
+                    # Small delay to reduce CPU usage
+                    time.sleep(0.03)
+                    
+                    # Check if session state is still active (button might have been pressed)
+                    if not st.session_state.camera_active:
                         st.session_state.stop_webcam = True
-                        break
                 
+                # Release webcam
                 cap.release()
                 status_indicator.info("Webcam stopped.")
+            
+            except Exception as e:
+                status_indicator.error(f"Error with webcam: {e}")
+                st.session_state.camera_active = False
+                st.session_state.stop_webcam = True
         
-        if stop_button:
-            st.session_state.stop_webcam = True
-            status_indicator.info("Stopping webcam...")
-    
     elif input_option == "Upload Image":
         status_indicator.info("Please upload an image.")
         
         uploaded_file = st.sidebar.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
         
         if uploaded_file is not None:
-            # Convert to numpy array
-            file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-            image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-            
-            status_indicator.info("Processing image...")
-            
-            # Process the image
-            annotated_frame, license_text, plate_found = process_frame(
-                image, detection_model, processor, model, device
-            )
-            
-            # Convert to RGB for display
-            annotated_frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-            
-            # Display results
-            image_placeholder.image(annotated_frame_rgb, channels="RGB", caption="Uploaded Image")
-            
-            if license_text:
-                result_placeholder.markdown(f"""
-                ### Detected License Plate
+            try:
+                # Convert to numpy array
+                file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+                image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
                 
-                **Text:** {license_text}
-                """)
-                status_indicator.success("License plate detected and recognized!")
-            else:
-                if plate_found:
-                    result_placeholder.warning("License plate detected, but text couldn't be recognized.")
-                    status_indicator.warning("License plate detected, but couldn't read the text.")
+                if image is None:
+                    status_indicator.error("Could not read uploaded image.")
+                    return
+                
+                status_indicator.info("Processing image...")
+                
+                # Process the image
+                annotated_frame, license_text, plate_found = process_frame(
+                    image, detection_model, processor, model, device
+                )
+                
+                # Convert to RGB for display
+                annotated_frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
+                
+                # Display results
+                image_placeholder.image(annotated_frame_rgb, channels="RGB", caption="Uploaded Image")
+                
+                if license_text:
+                    result_placeholder.markdown(f"""
+                    ### Detected License Plate
+                    
+                    **Text:** {license_text}
+                    """)
+                    status_indicator.success("License plate detected and recognized!")
                 else:
-                    result_placeholder.error("No license plate detected in the image.")
-                    status_indicator.error("No license plate detected.")
+                    if plate_found:
+                        result_placeholder.warning("License plate detected, but text couldn't be recognized.")
+                        status_indicator.warning("License plate detected, but couldn't read the text.")
+                    else:
+                        result_placeholder.error("No license plate detected in the image.")
+                        status_indicator.error("No license plate detected.")
+            except Exception as e:
+                status_indicator.error(f"Error processing image: {e}")
     
     elif input_option == "Upload Video":
         status_indicator.info("Please upload a video file.")
@@ -323,19 +408,24 @@ def main():
         uploaded_file = st.sidebar.file_uploader("Choose a video...", type=["mp4", "mov", "avi"])
         
         if uploaded_file is not None:
-            # Save the uploaded file to a temporary file
-            temp_file = "temp_video.mp4"
-            with open(temp_file, "wb") as f:
-                f.write(uploaded_file.read())
-            
-            status_indicator.info("Processing video...")
-            
-            # Open the video file
-            cap = cv2.VideoCapture(temp_file)
-            
-            if not cap.isOpened():
-                status_indicator.error("Error opening video file.")
-            else:
+            try:
+                # Create a temporary file
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
+                    tmp_file.write(uploaded_file.read())
+                    temp_file_path = tmp_file.name
+                
+                status_indicator.info("Processing video...")
+                
+                # Open the video file
+                cap = cv2.VideoCapture(temp_file_path)
+                
+                if not cap.isOpened():
+                    status_indicator.error("Error opening video file.")
+                    # Clean up and return
+                    if os.path.exists(temp_file_path):
+                        os.unlink(temp_file_path)
+                    return
+                    
                 # Get video info for the progress bar
                 total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
                 fps = cap.get(cv2.CAP_PROP_FPS)
@@ -360,7 +450,9 @@ def main():
                         )
                         
                         if license_text:
-                            all_detections.append((frame_counter, license_text))
+                            # Check if it's a new detection or same as previous
+                            if not all_detections or all_detections[-1][1] != license_text:
+                                all_detections.append((frame_counter, license_text))
                             
                         # Display the current frame
                         if frame_counter % 15 == 0:  # Update display less frequently
@@ -374,7 +466,8 @@ def main():
                 cap.release()
                 
                 # Clean up temporary file
-                os.remove(temp_file)
+                if os.path.exists(temp_file_path):
+                    os.unlink(temp_file_path)
                 
                 # Show results
                 status_indicator.success(f"Video processing complete! Found {len(all_detections)} license plates.")
@@ -388,12 +481,17 @@ def main():
                     result_placeholder.markdown(result_text)
                 else:
                     result_placeholder.warning("No license plates detected in the video.")
+            except Exception as e:
+                status_indicator.error(f"Error processing video: {e}")
+                # Clean up if necessary
+                if 'temp_file_path' in locals() and os.path.exists(temp_file_path):
+                    os.unlink(temp_file_path)
 
-    # Add some instructions at the bottom
+    # Add instructions at the bottom
     st.markdown("""
     ### How to use:
     1. Select an input source from the sidebar (Webcam, Upload Image, or Upload Video).
-    2. For webcam, press Start and wait for detections.
+    2. For webcam, press Start Camera and wait for detections.
     3. For images and videos, upload a file and wait for processing.
     
     The system will detect license plates and attempt to read the text.
