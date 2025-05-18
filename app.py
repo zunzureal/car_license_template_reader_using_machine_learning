@@ -55,7 +55,7 @@ def is_valid_license_plate(text):
         return False
         
     thai_chars = re.findall(r'[ก-๙]', text)
-    has_thai = len(thai_chars) >= 2
+    has_thai = len(thai_chars) == 2
     
     numbers = re.findall(r'[0-9]', text)
     has_four_numbers = 4 <= len(numbers) <= 5
@@ -476,7 +476,7 @@ def main():
     st.sidebar.markdown("### Database Options")
     save_to_db = st.sidebar.checkbox("Auto-save valid detections to database", False)
     save_images = st.sidebar.checkbox("Save images with detections", True)
-    default_city = st.sidebar.text_input("Default city for detections", "Bangkok")
+    default_city = st.sidebar.text_input("Default city for detections", "กรุงเทพมหานคร")
     
     # Determine available input sources
     input_sources = ["Upload Image", "Upload Video"]
@@ -729,7 +729,7 @@ def main():
                         break
                     
                     # Process every 5th frame for speed (adjust as needed)
-                    if frame_counter % 5 == 0:
+                    if frame_counter % 25 == 0:
                         annotated_frame, license_text, plate_found = process_frame(
                             frame, detection_model, processor, model, device
                         )
