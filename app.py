@@ -11,6 +11,7 @@ import re
 from itertools import groupby
 import tempfile
 import platform
+import traceback
 
 # Page configuration
 st.set_page_config(
@@ -35,29 +36,59 @@ if "webcam_warning_shown" not in st.session_state:
 @st.cache_resource
 def load_models():
     try:
-        # Load OCR models
-        processor = TrOCRProcessor.from_pretrained("spykittichai/th-character-ocr")
-        model = VisionEncoderDecoderModel.from_pretrained("spykittichai/th-character-ocr")
+        # Load OCR models with use_fast=True to fix the warning
+        processor = TrOCRProcessor.from_pretrained(
+            "spykittichai/th-character-ocr", 
+            use_fast=False,
+            trust_remote_code=True
+        )
+        
+        model = VisionEncoderDecoderModel.from_pretrained(
+            "spykittichai/th-character-ocr",
+            trust_remote_code=True
+        )
+        
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         model.to(device)
         
-        # Load detection model
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        detection_model_path = os.path.join(script_dir, "detection/model/best.pt")
-        
-        if not os.path.exists(detection_model_path):
-            st.warning(f"Model file not found at {detection_model_path}, trying relative path")
-            detection_model_path = "detection/model/best.pt"
+        # Load detection model with better path handling
+        try:
+            # First try the absolute path
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            detection_model_path = os.path.join(script_dir, "detection/model/best.pt")
             
+            # If not found, try relative paths
             if not os.path.exists(detection_model_path):
-                st.error(f"Model file not found at {detection_model_path} either")
-                return None, None, None, None
-        
-        detection_model = YOLO(detection_model_path)
-        
-        return processor, model, device, detection_model
+                candidate_paths = [
+                    "detection/model/best.pt",
+                    "./detection/model/best.pt",
+                    "../detection/model/best.pt",
+                    "best.pt"
+                ]
+                
+                for path in candidate_paths:
+                    if os.path.exists(path):
+                        detection_model_path = path
+                        st.success(f"Found model at {path}")
+                        break
+                else:
+                    # If model still not found, try downloading a default model
+                    st.warning("Model not found locally, downloading a default YOLO model...")
+                    detection_model = YOLO("yolov8n.pt")
+                    return processor, model, device, detection_model
+            
+            detection_model = YOLO(detection_model_path)
+            return processor, model, device, detection_model
+            
+        except Exception as model_error:
+            st.error(f"Error loading detection model: {model_error}")
+            st.info("Falling back to default YOLO model...")
+            detection_model = YOLO("yolov8n.pt")
+            return processor, model, device, detection_model
+            
     except Exception as e:
         st.error(f"Error loading models: {e}")
+        st.code(traceback.format_exc())
         return None, None, None, None
 
 def predict(processor, model, device, image_path):
@@ -235,12 +266,15 @@ def check_webcam_available():
     max_to_check = 3  # Check cameras 0, 1, 2
     
     for i in range(max_to_check):
-        cap = cv2.VideoCapture(i)
-        if cap.isOpened():
-            ret, frame = cap.read()
-            if ret:
-                available_cameras.append(i)
-            cap.release()
+        try:
+            cap = cv2.VideoCapture(i)
+            if cap.isOpened():
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    available_cameras.append(i)
+                cap.release()
+        except:
+            pass
     
     return available_cameras
 
@@ -288,8 +322,15 @@ def use_uploaded_image(image_bytes, detection_model, processor, model, device, s
 def main():
     st.title("🚗 Thai License Plate Recognition")
     
-    # Check available cameras first
-    available_cameras = check_webcam_available()
+    # Always provide image upload option regardless of webcam
+    # Check available cameras in background
+    available_cameras = []
+    
+    try:
+        available_cameras = check_webcam_available()
+    except Exception as e:
+        st.sidebar.warning(f"Error checking for cameras: {e}")
+    
     webcam_available = len(available_cameras) > 0
     
     # If running on Streamlit Cloud, webcams might be disabled
@@ -300,11 +341,20 @@ def main():
         processor, model, device, detection_model = load_models()
         if processor is None or model is None or device is None or detection_model is None:
             st.error("Failed to load models. Please check your model files and dependencies.")
+            st.markdown("""
+            ### Troubleshooting:
+            1. Make sure you have the detection model in `detection/model/best.pt`
+            2. Make sure your transformers and torch versions are compatible
+            3. Check your internet connection for downloading models
+            """)
             return
         st.success("Models loaded successfully! Ready to detect license plates.")
     
     # Sidebar options
     st.sidebar.title("Options")
+    
+    # Always provide Demo mode
+    demo_mode = st.sidebar.checkbox("Use Demo Mode (sample images)", False)
     
     # Determine available input sources
     input_sources = ["Upload Image", "Upload Video"]
@@ -312,7 +362,7 @@ def main():
         input_sources.insert(0, "Webcam")
         
     # Show warning if webcam not available
-    if not webcam_available and not st.session_state.webcam_warning_shown:
+    if not webcam_available and not st.session_state.webcam_warning_shown and not demo_mode:
         st.warning("⚠️ No webcams detected on this system. Only upload options will be available.")
         st.session_state.webcam_warning_shown = True
         
@@ -331,7 +381,32 @@ def main():
     # Create a status indicator
     status_indicator = st.empty()
     
-    if input_option == "Webcam" and webcam_available:
+    if demo_mode:
+        st.info("Using demo mode with test images.")
+        # List of demo images
+        demo_images = {
+            "Thai License Plate 1": "https://raw.githubusercontent.com/zunzureal/license-plate-demo-images/main/plate1.jpg",
+            "Thai License Plate 2": "https://raw.githubusercontent.com/zunzureal/license-plate-demo-images/main/plate2.jpg", 
+            "Demo Car": "https://raw.githubusercontent.com/zunzureal/license-plate-demo-images/main/car.jpg"
+        }
+        
+        selected_image = st.selectbox("Select a demo image:", list(demo_images.keys()))
+        
+        if st.button("Process Demo Image"):
+            status_indicator.info(f"Processing demo image: {selected_image}")
+            
+            try:
+                import urllib.request
+                image_url = demo_images[selected_image]
+                with urllib.request.urlopen(image_url) as response:
+                    image_bytes = bytearray(response.read())
+                
+                use_uploaded_image(image_bytes, detection_model, processor, model, device, 
+                                  status_indicator, image_placeholder, result_placeholder)
+            except Exception as e:
+                status_indicator.error(f"Error loading demo image: {e}")
+    
+    elif input_option == "Webcam" and webcam_available:
         # Camera selector for available cameras
         if len(available_cameras) > 1:
             camera_index = st.sidebar.selectbox(
@@ -343,71 +418,65 @@ def main():
             camera_index = available_cameras[0]
             st.sidebar.info(f"Using camera at index {camera_index} (only one camera available)")
             
-        # Demo image toggle - for environments where webcam doesn't work
-        use_demo_mode = st.sidebar.checkbox("Use Demo Mode (for environments without camera access)", False)
-        
-        if use_demo_mode:
-            st.info("Using demo mode with test images instead of webcam feed.")
-            # List of demo images
-            demo_images = {
-                "Thai License Plate 1": "https://raw.githubusercontent.com/zunzureal/license-plate-demo-images/main/plate1.jpg",
-                "Thai License Plate 2": "https://raw.githubusercontent.com/zunzureal/license-plate-demo-images/main/plate2.jpg", 
-                "Demo Car": "https://raw.githubusercontent.com/zunzureal/license-plate-demo-images/main/car.jpg"
-            }
+        # Create start/stop button for webcam
+        button_text = "Stop Camera" if st.session_state.camera_active else "Start Camera"
+        st.button(button_text, on_click=start_stop_webcam)
             
-            selected_image = st.selectbox("Select a demo image:", list(demo_images.keys()))
+        if st.session_state.camera_active:
+            status_indicator.info("Starting webcam...")
             
-            if st.button("Process Demo Image"):
-                status_indicator.info(f"Processing demo image: {selected_image}")
+            # Initialize webcam capture
+            try:
+                # Try different webcam access methods
+                cap = None
                 
-                try:
-                    import urllib.request
-                    image_url = demo_images[selected_image]
-                    with urllib.request.urlopen(image_url) as response:
-                        image_bytes = bytearray(response.read())
-                    
-                    use_uploaded_image(image_bytes, detection_model, processor, model, device, 
-                                      status_indicator, image_placeholder, result_placeholder)
-                except Exception as e:
-                    status_indicator.error(f"Error loading demo image: {e}")
-        else:
-            # Create start/stop button for webcam
-            button_text = "Stop Camera" if st.session_state.camera_active else "Start Camera"
-            st.button(button_text, on_click=start_stop_webcam)
+                # Try different methods to open the camera
+                methods = [
+                    lambda: cv2.VideoCapture(camera_index),
+                    lambda: cv2.VideoCapture(camera_index, cv2.CAP_DSHOW),  # For Windows
+                    lambda: cv2.VideoCapture(camera_index, cv2.CAP_AVFOUNDATION)  # For Mac
+                ]
                 
-            if st.session_state.camera_active:
-                status_indicator.info("Starting webcam...")
+                for method in methods:
+                    try:
+                        cap = method()
+                        if cap.isOpened():
+                            ret, test_frame = cap.read()
+                            if ret and test_frame is not None:
+                                break
+                            else:
+                                cap.release()
+                                cap = None
+                    except:
+                        if cap:
+                            cap.release()
+                        cap = None
                 
-                # Initialize webcam capture
-                try:
-                    # Try different webcam access methods
-                    cap = cv2.VideoCapture(camera_index)
-                    
-                    # Check if webcam opened successfully - we already verified it works above,
-                    # but double-check in case another app grabbed it
-                    if not cap.isOpened():
-                        status_indicator.error(f"Could not open webcam with index {camera_index}. It may have been claimed by another application.")
-                        st.session_state.camera_active = False
-                        return
-                    
-                    status_indicator.success("Webcam started! Processing frames...")
-                    
-                    # Reset stopping flag
-                    st.session_state.stop_webcam = False
-                    
-                    # For cooldown between detections
-                    last_detection_time = 0
-                    cooldown_period = 1  # 1 second between detections
-                    
-                    # Create a loop for camera frames
-                    frame_placeholder = st.empty()
-                    
-                    while not st.session_state.stop_webcam:
+                # Check if webcam opened successfully
+                if cap is None or not cap.isOpened():
+                    status_indicator.error(f"Could not open webcam with index {camera_index}. It may have been claimed by another application.")
+                    st.session_state.camera_active = False
+                    return
+                
+                status_indicator.success("Webcam started! Processing frames...")
+                
+                # Reset stopping flag
+                st.session_state.stop_webcam = False
+                
+                # For cooldown between detections
+                last_detection_time = 0
+                cooldown_period = 1  # 1 second between detections
+                
+                # Create a loop for camera frames
+                frame_placeholder = st.empty()
+                
+                while not st.session_state.stop_webcam:
+                    try:
                         # Read frame
                         ret, frame = cap.read()
                         
-                        if not ret:
-                            status_indicator.warning("Failed to capture frame from camera")
+                        if not ret or frame is None:
+                            status_indicator.warning("Failed to capture frame from camera. Retrying...")
                             time.sleep(0.5)  # Wait a bit and try again
                             continue
                         
@@ -451,19 +520,23 @@ def main():
                         
                         # Small delay to reduce CPU usage
                         time.sleep(0.03)
+                    except Exception as frame_error:
+                        st.error(f"Error processing frame: {frame_error}")
+                        time.sleep(0.5)
                         
-                        # Check if session state is still active (button might have been pressed)
-                        if not st.session_state.camera_active:
-                            st.session_state.stop_webcam = True
-                    
-                    # Release webcam
-                    cap.release()
-                    status_indicator.info("Webcam stopped.")
+                    # Check if session state is still active (button might have been pressed)
+                    if not st.session_state.camera_active:
+                        st.session_state.stop_webcam = True
                 
-                except Exception as e:
-                    status_indicator.error(f"Error with webcam: {e}")
-                    st.session_state.camera_active = False
-                    st.session_state.stop_webcam = True
+                # Release webcam
+                if cap and cap.isOpened():
+                    cap.release()
+                status_indicator.info("Webcam stopped.")
+            
+            except Exception as e:
+                status_indicator.error(f"Error with webcam: {e}")
+                st.session_state.camera_active = False
+                st.session_state.stop_webcam = True
         
     elif input_option == "Upload Image":
         status_indicator.info("Please upload an image.")
@@ -471,9 +544,12 @@ def main():
         uploaded_file = st.sidebar.file_uploader("Choose an image...", type=["jpg", "jpeg", "png"])
         
         if uploaded_file is not None:
-            image_bytes = uploaded_file.getvalue()
-            use_uploaded_image(image_bytes, detection_model, processor, model, device, 
-                             status_indicator, image_placeholder, result_placeholder)
+            try:
+                image_bytes = uploaded_file.getvalue()
+                use_uploaded_image(image_bytes, detection_model, processor, model, device, 
+                                status_indicator, image_placeholder, result_placeholder)
+            except Exception as e:
+                status_indicator.error(f"Error processing uploaded image: {e}")
     
     elif input_option == "Upload Video":
         status_indicator.info("Please upload a video file.")
@@ -581,6 +657,10 @@ def main():
         st.sidebar.markdown(f"• Available cameras: **{len(available_cameras)}** (indices: {', '.join(map(str, available_cameras))})")
     else:
         st.sidebar.markdown("• No cameras detected")
+    
+    # Add versions info
+    st.sidebar.markdown(f"• Python version: **{platform.python_version()}**")
+    st.sidebar.markdown(f"• OpenCV version: **{cv2.__version__}**")
 
 if __name__ == "__main__":
     main()
